@@ -80,9 +80,150 @@
         b.classList.toggle("nav-active", b.dataset.nav === viewId)
       );
       window.scrollTo({ top: 0, behavior: "instant" in window ? "instant" : "auto" });
-      if (viewId !== "view-camera") CameraController.stop();
+      if (viewId !== "view-camera") { CameraController.stop(); EdgeLoop.stop(); }
     },
   };
+
+  /* ---------------------------------------------------------------
+   * LIVE EDGE DETECTION — real-time document outline over the camera
+   * preview (Sobel + connected components, see js/edgeDetector.js),
+   * temporally smoothed so the overlay glides instead of jittering.
+   * --------------------------------------------------------------- */
+  const EdgeLoop = (() => {
+    const SMOOTH_ALPHA = 0.35;
+    const MAX_MISS = 6;
+    const STABLE_NEEDED = 4;
+    const DETECT_INTERVAL = 180; // ms between analysis passes
+
+    let raf = null, timer = null, running = false;
+    let smoothed = null;   // {corners, score} in video-native pixel space
+    let missStreak = 0, stableStreak = 0;
+    let overlayCanvas = null, overlayCtx = null, videoEl = null;
+
+    function start(video) {
+      stop();
+      videoEl = video;
+      overlayCanvas = $("#edgeOverlay");
+      overlayCtx = overlayCanvas.getContext("2d");
+      smoothed = null; missStreak = 0; stableStreak = 0;
+      running = true;
+      setState("searching");
+      tick();
+      raf = requestAnimationFrame(renderLoop);
+    }
+
+    function stop() {
+      running = false;
+      if (raf) cancelAnimationFrame(raf);
+      if (timer) clearTimeout(timer);
+      raf = null; timer = null;
+      if (overlayCtx && overlayCanvas) overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+      const stage = document.querySelector(".camera-stage");
+      if (stage) stage.classList.remove("edge-locked", "edge-searching");
+      const shutter = $("#shutterBtn");
+      if (shutter) shutter.classList.remove("ready");
+      smoothed = null;
+    }
+
+    function tick() {
+      if (!running) return;
+      try {
+        if (videoEl.readyState >= 2) {
+          const result = EdgeDetector.detectFromVideoFrame(videoEl);
+          if (result) {
+            missStreak = 0;
+            stableStreak = Math.min(stableStreak + 1, 99);
+            smoothed = !smoothed ? result : {
+              corners: smoothed.corners.map((c, i) => ({
+                x: c.x + (result.corners[i].x - c.x) * SMOOTH_ALPHA,
+                y: c.y + (result.corners[i].y - c.y) * SMOOTH_ALPHA,
+              })),
+              score: result.score,
+            };
+            setState(stableStreak >= STABLE_NEEDED ? "locked" : "searching");
+          } else {
+            missStreak++;
+            stableStreak = 0;
+            if (missStreak > MAX_MISS) { smoothed = null; setState("searching"); }
+          }
+        }
+      } catch (err) {
+        // detection must never break the capture flow
+      }
+      timer = setTimeout(tick, DETECT_INTERVAL);
+    }
+
+    function renderLoop() {
+      if (!running) return;
+      drawOverlay();
+      raf = requestAnimationFrame(renderLoop);
+    }
+
+    function drawOverlay() {
+      const stage = videoEl.closest(".camera-stage");
+      if (!stage) return;
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      const cw = stage.clientWidth, ch = stage.clientHeight;
+      const needW = Math.round(cw * dpr), needH = Math.round(ch * dpr);
+      if (overlayCanvas.width !== needW || overlayCanvas.height !== needH) {
+        overlayCanvas.width = needW;
+        overlayCanvas.height = needH;
+        overlayCanvas.style.width = cw + "px";
+        overlayCanvas.style.height = ch + "px";
+      }
+      overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      overlayCtx.clearRect(0, 0, cw, ch);
+      if (!smoothed || !videoEl.videoWidth) return;
+
+      const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
+      const scale = Math.max(cw / vw, ch / vh); // object-fit: cover mapping
+      const drawnW = vw * scale, drawnH = vh * scale;
+      const offX = (cw - drawnW) / 2, offY = (ch - drawnH) / 2;
+      const toDisplay = (p) => ({ x: p.x * scale + offX, y: p.y * scale + offY });
+      const pts = smoothed.corners.map(toDisplay);
+
+      const locked = stableStreak >= STABLE_NEEDED;
+      const color = locked ? "#4ADE80" : "#22D3EE";
+      overlayCtx.lineJoin = "round";
+      overlayCtx.lineWidth = 3;
+      overlayCtx.strokeStyle = color;
+      overlayCtx.fillStyle = locked ? "rgba(74,222,128,0.14)" : "rgba(34,211,238,0.10)";
+      overlayCtx.shadowColor = color;
+      overlayCtx.shadowBlur = 10;
+      overlayCtx.beginPath();
+      overlayCtx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < 4; i++) overlayCtx.lineTo(pts[i].x, pts[i].y);
+      overlayCtx.closePath();
+      overlayCtx.fill();
+      overlayCtx.stroke();
+      overlayCtx.shadowBlur = 0;
+      pts.forEach((p) => {
+        overlayCtx.beginPath();
+        overlayCtx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+        overlayCtx.fillStyle = color;
+        overlayCtx.fill();
+      });
+    }
+
+    function setState(state) {
+      const stage = document.querySelector(".camera-stage");
+      const hint = $("#cameraHint");
+      const badgeText = $("#detectBadgeText");
+      const shutter = $("#shutterBtn");
+      if (!stage) return;
+      stage.classList.toggle("edge-locked", state === "locked");
+      stage.classList.toggle("edge-searching", state === "searching");
+      if (shutter) shutter.classList.toggle("ready", state === "locked");
+      if (hint) hint.textContent = state === "locked" ? "Documento detectado · toca para capturar" : "Buscando el documento…";
+      if (badgeText) badgeText.textContent = state === "locked" ? "Listo" : "Buscando…";
+    }
+
+    function currentQuad() {
+      return smoothed ? smoothed.corners : null;
+    }
+
+    return { start, stop, currentQuad };
+  })();
 
   /* ---------------------------------------------------------------
    * App-wide state
@@ -92,6 +233,7 @@
     currentPages: [],     // pages of the document being built
     activePage: null,     // page currently in the crop/edit pipeline
     editingExistingIndex: null, // index into currentPages when re-editing
+    pendingDetectedCorners: null, // live-detected quad from the last shutter press
   };
 
   function newPage(baseCanvas) {
@@ -222,6 +364,7 @@
     Router.show("view-camera");
     try {
       await CameraController.start($("#cameraVideo"));
+      EdgeLoop.start($("#cameraVideo"));
     } catch (err) {
       toast("No se pudo acceder a la cámara. Revisa los permisos.", "error");
       Router.show("view-home");
@@ -230,9 +373,13 @@
 
   $("#cameraBackBtn").addEventListener("click", () => {
     CameraController.stop();
+    EdgeLoop.stop();
     Router.show("view-home");
   });
-  $("#cameraSwitchBtn").addEventListener("click", () => CameraController.switchCamera());
+  $("#cameraSwitchBtn").addEventListener("click", async () => {
+    await CameraController.switchCamera();
+    EdgeLoop.start($("#cameraVideo")); // fresh stream -> restart detection cleanly
+  });
   $("#shutterBtn").addEventListener("click", async () => {
     if (!CameraController.isActive()) return;
     SoundFX.shutter();
@@ -241,6 +388,9 @@
 
     const canvas = $("#captureCanvas");
     CameraController.captureFrame(canvas);
+    // capture the live-detected quad (native video pixel space, matches
+    // captureFrame's canvas exactly) before it's cleared by EdgeLoop.stop()
+    State.pendingDetectedCorners = EdgeLoop.currentQuad();
     const img = await loadImage(canvas.toDataURL("image/jpeg", 0.95));
     State.uploadQueue.push(img);
     // keep camera open for rapid multi-page capture; queue processes in background
@@ -257,7 +407,13 @@
     if (!img) return;
     queueBusy = true;
     CameraController.stop();
-    await openCropView(canvasFromImage(img));
+    EdgeLoop.stop();
+    // if this page came straight from a live camera capture, reuse the
+    // exact quad that was locked on screen instead of re-analyzing a still
+    // frame — it's already smoothed and the user saw it before shooting.
+    const liveCorners = State.pendingDetectedCorners;
+    State.pendingDetectedCorners = null;
+    await openCropView(canvasFromImage(img), liveCorners);
   }
 
   /* ----- Crop editor ----- */
@@ -270,7 +426,7 @@
     dpr: Math.max(1, window.devicePixelRatio || 1),
   };
 
-  async function openCropView(sourceCanvas) {
+  async function openCropView(sourceCanvas, initialCorners) {
     Crop.sourceCanvas = sourceCanvas;
     Router.show("view-crop");
     Crop.canvas = $("#cropCanvas");
@@ -286,7 +442,7 @@
     Crop.canvas.width = Math.round(cssW * Crop.dpr);
     Crop.canvas.height = Math.round(sourceCanvas.height * scale * Crop.dpr);
 
-    Crop.corners = ImageProcessing.detectDocumentCorners(sourceCanvas);
+    Crop.corners = initialCorners || ImageProcessing.detectDocumentCorners(sourceCanvas);
     drawCrop();
   }
 
