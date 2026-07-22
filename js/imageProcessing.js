@@ -133,82 +133,17 @@ const ImageProcessing = (() => {
   function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 
   /* ----------------------------------------------------------------
-   * 2) LIGHTWEIGHT AUTOMATIC DOCUMENT-EDGE DETECTION
-   * Downscales the image, builds a grayscale gradient (Sobel) map, and
-   * finds the bounding box that best separates a bright, low-texture
-   * "paper" region from the busier background. This is a heuristic
-   * (no full contour/hough pipeline) but works well for the common case
-   * of a document photographed against a contrasting surface, and
-   * always falls back gracefully to the full frame.
+   * 2) AUTOMATIC DOCUMENT-EDGE DETECTION
+   * Delegates to EdgeDetector (see js/edgeDetector.js), which runs a real
+   * contour pipeline (Sobel edges -> connected components -> convex hull
+   * -> quadrilateral reduction) instead of a simple bounding-box heuristic.
+   * Always falls back gracefully to a safe inset of the full frame if no
+   * confident quad is found.
    * ---------------------------------------------------------------- */
   function detectDocumentCorners(canvas) {
-    const W = 220; // analysis width, downscaled for speed
-    const scale = W / canvas.width;
-    const H = Math.max(1, Math.round(canvas.height * scale));
-
-    const small = document.createElement("canvas");
-    small.width = W; small.height = H;
-    const sctx = small.getContext("2d");
-    sctx.drawImage(canvas, 0, 0, W, H);
-    const { data } = sctx.getImageData(0, 0, W, H);
-
-    // grayscale
-    const gray = new Float32Array(W * H);
-    for (let i = 0; i < W * H; i++) {
-      const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
-      gray[i] = 0.299 * r + 0.587 * g + 0.114 * b;
-    }
-
-    // Sobel gradient magnitude
-    const mag = new Float32Array(W * H);
-    for (let y = 1; y < H - 1; y++) {
-      for (let x = 1; x < W - 1; x++) {
-        const gx =
-          -gray[(y - 1) * W + x - 1] + gray[(y - 1) * W + x + 1] +
-          -2 * gray[y * W + x - 1] + 2 * gray[y * W + x + 1] +
-          -gray[(y + 1) * W + x - 1] + gray[(y + 1) * W + x + 1];
-        const gy =
-          -gray[(y - 1) * W + x - 1] - 2 * gray[(y - 1) * W + x] - gray[(y - 1) * W + x + 1] +
-          gray[(y + 1) * W + x - 1] + 2 * gray[(y + 1) * W + x] + gray[(y + 1) * W + x + 1];
-        mag[y * W + x] = Math.hypot(gx, gy);
-      }
-    }
-
-    // Threshold and find the largest bright, low-noise bounding box using
-    // row/column projection profiles of "edge energy".
-    let maxMag = 0;
-    for (let i = 0; i < mag.length; i++) if (mag[i] > maxMag) maxMag = mag[i];
-    const thresh = maxMag * 0.18;
-
-    const colSum = new Float32Array(W);
-    const rowSum = new Float32Array(H);
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        const v = mag[y * W + x] > thresh ? 1 : 0;
-        colSum[x] += v;
-        rowSum[y] += v;
-      }
-    }
-
-    const marginFrac = 0.04;
-    const left = findEdge(colSum, W, marginFrac, true);
-    const right = findEdge(colSum, W, marginFrac, false);
-    const top = findEdge(rowSum, H, marginFrac, true);
-    const bottom = findEdge(rowSum, H, marginFrac, false);
-
-    // Fallback / sanity check: if detection collapses to a tiny or full-frame
-    // region, default to a safe inset of the full image.
-    const okW = right - left > W * 0.35;
-    const okH = bottom - top > H * 0.35;
-
-    const inv = 1 / scale;
-    if (okW && okH) {
-      return [
-        { x: left * inv, y: top * inv },
-        { x: right * inv, y: top * inv },
-        { x: right * inv, y: bottom * inv },
-        { x: left * inv, y: bottom * inv },
-      ];
+    if (typeof EdgeDetector !== "undefined") {
+      const result = EdgeDetector.detectFromCanvas(canvas);
+      if (result && result.corners) return result.corners;
     }
     // fallback: 4% inset from full frame
     const iw = canvas.width, ih = canvas.height;
@@ -217,19 +152,6 @@ const ImageProcessing = (() => {
       { x: mx, y: my }, { x: iw - mx, y: my },
       { x: iw - mx, y: ih - my }, { x: mx, y: ih - my },
     ];
-  }
-
-  function findEdge(profile, len, marginFrac, fromStart) {
-    const margin = Math.round(len * marginFrac);
-    const avg = profile.reduce((a, v) => a + v, 0) / len;
-    const cut = Math.max(1, avg * 0.5);
-    if (fromStart) {
-      for (let i = margin; i < len; i++) if (profile[i] > cut) return i;
-      return margin;
-    } else {
-      for (let i = len - 1 - margin; i >= 0; i--) if (profile[i] > cut) return i;
-      return len - margin;
-    }
   }
 
   /* ----------------------------------------------------------------
