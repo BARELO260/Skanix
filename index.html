@@ -101,12 +101,16 @@
       <div class="camera-stage">
         <video id="cameraVideo" autoplay playsinline muted></video>
         <canvas id="captureCanvas" class="hidden-canvas"></canvas>
+        <canvas id="edgeOverlay" class="edge-overlay"></canvas>
         <div class="viewfinder">
           <span class="vf-corner vf-tl"></span>
           <span class="vf-corner vf-tr"></span>
           <span class="vf-corner vf-bl"></span>
           <span class="vf-corner vf-br"></span>
           <div id="scanSweep" class="scan-sweep"></div>
+        </div>
+        <div id="detectBadge" class="detect-badge">
+          <span class="detect-dot"></span><span id="detectBadgeText">Buscando…</span>
         </div>
         <div id="cameraHint" class="camera-hint">Encuadra el documento dentro del marco</div>
         <div id="flashOverlay" class="flash-overlay"></div>
@@ -300,6 +304,7 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="js/db.js"></script>
+<script src="js/edgeDetector.js"></script>
 <script src="js/imageProcessing.js"></script>
 <script src="js/camera.js"></script>
 <script src="js/sound.js"></script>
